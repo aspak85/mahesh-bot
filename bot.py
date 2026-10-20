@@ -32,6 +32,18 @@ OFFSET_FILE = os.path.join(BASE, "offset.txt")
 FILEID_FILE = os.path.join(BASE, "file_ids.json")
 PROOFS_DIR = os.path.join(BASE, "proofs")
 
+# ---------- Channel auto-posting (James ke bheje hue posts) ----------
+# Channel: Aviasoft VIP CLUB (@aviasoft_vipclub). Bot wahan admin hai.
+# Queue postqueue/queue.json se seed hoti hai, state Upstash me rehta hai.
+# Admin (James) bot ko DM karke override kar sakta hai: /poston /postoff
+# /postnow /poststatus. Posting AUTO hai — deploy ke ~2 min baad pehla
+# post, phir har 30 min me ek. /postoff se kabhi bhi ruk jayegi.
+POST_CHANNEL_ID = int(os.environ.get("POST_CHANNEL_ID", "-1004453476874"))
+POST_GAP = 1800        # channel posts ke beech 30 minute ka gap
+POSTQUEUE_DIR = os.path.join(BASE, "postqueue")
+POSTQUEUE_FILE = os.path.join(BASE, "postqueue.json")
+POSTSTATE_FILE = os.path.join(BASE, "poststate.json")
+
 CHANNEL_URL = "https://t.me/+ZJOQDxH9C985Mzdl"
 
 PROOF_GAP = 10800      # drip items ke beech 3 ghante — kuch bhi repeat nahi hota
@@ -559,6 +571,160 @@ def proof_loop():
         time.sleep(30)
 
 
+_postqueue_cache = None
+_poststate_cache = None
+
+
+def load_postqueue():
+    global _postqueue_cache
+    if _postqueue_cache is not None:
+        return _postqueue_cache
+    raw = store_get("postqueue", POSTQUEUE_FILE)
+    q = None
+    try:
+        q = json.loads(raw) if raw else None
+    except Exception:
+        q = None
+    if q is None:
+        # Pehli baar: repo ke postqueue/queue.json se seed bharo
+        q = []
+        try:
+            with open(os.path.join(POSTQUEUE_DIR, "queue.json")) as f:
+                for item in json.load(f):
+                    q.append({"n": item["n"], "file": item["file"],
+                              "caption": item["caption"]})
+        except Exception:
+            q = []
+        if q:
+            save_postqueue(q)
+    _postqueue_cache = q
+    return _postqueue_cache
+
+
+def save_postqueue(q):
+    global _postqueue_cache
+    _postqueue_cache = q
+    store_set("postqueue", POSTQUEUE_FILE, json.dumps(q))
+
+
+def load_poststate():
+    global _poststate_cache
+    if _poststate_cache is not None:
+        return _poststate_cache
+    raw = store_get("poststate", POSTSTATE_FILE)
+    try:
+        _poststate_cache = json.loads(raw) if raw else {}
+    except Exception:
+        _poststate_cache = {}
+    fresh = not _poststate_cache
+    _poststate_cache.setdefault("on", True)
+    _poststate_cache.setdefault("last_post", 0)
+    _poststate_cache.setdefault("posted_total", 0)
+    if fresh:
+        # AUTO posting: pehla post deploy ke ~2 minute baad jaye,
+        # phir har 30 min me ek (last_post peeche rakhke gap ghata diya)
+        _poststate_cache["last_post"] = time.time() - POST_GAP + 120
+        save_poststate(_poststate_cache)
+    return _poststate_cache
+
+
+def save_poststate(s):
+    global _poststate_cache
+    _poststate_cache = s
+    store_set("poststate", POSTSTATE_FILE, json.dumps(s))
+
+
+def send_channel_photo(chat_id, path, caption):
+    """Channel par photo + caption (koi button nahi — caption me hi links)."""
+    for i in range(4):
+        try:
+            fields = {"chat_id": str(chat_id)}
+            if caption:
+                fields["caption"] = caption
+            r = _multipart("sendPhoto", fields, "photo", path, timeout=60)
+            if r.get("ok"):
+                return True
+            print(f"channel sendPhoto not ok: {str(r)[:200]}", flush=True)
+        except Exception as e:
+            print(f"channel sendPhoto try {i + 1}/4 failed: {e}", flush=True)
+        time.sleep(3)
+    return False
+
+
+def send_channel_video(chat_id, path, caption):
+    """Channel par video + caption. Pehle file_id se (instant), warna upload."""
+    fid = _file_id(path)
+    if fid:
+        p = {"chat_id": chat_id, "video": fid, "supports_streaming": True}
+        if caption:
+            p["caption"] = caption
+        r = api("sendVideo", p, retries=2)
+        if r.get("ok"):
+            return True
+    for i in range(4):
+        try:
+            fields = {"chat_id": str(chat_id), "supports_streaming": "true"}
+            if caption:
+                fields["caption"] = caption
+            r = _multipart("sendVideo", fields, "video", path, timeout=180)
+            if r.get("ok"):
+                v = r["result"].get("video", {})
+                if v.get("file_id"):
+                    _cache_file_id(path, v["file_id"])
+                return True
+            print(f"channel sendVideo not ok: {str(r)[:200]}", flush=True)
+        except Exception as e:
+            print(f"channel sendVideo try {i + 1}/4 failed: {e}", flush=True)
+        time.sleep(3)
+    return False
+
+
+def poster_tick(force=False):
+    """Ek posting pass — queue ka pehla item channel par bhejo.
+    Gap (30 min) aur ON/OFF ka dhyaan; force=True par dono bypass.
+    Return: True agar post lag gaya."""
+    st = load_poststate()
+    if not st.get("on") and not force:
+        return False
+    q = load_postqueue()
+    if not q:
+        return False
+    now = time.time()
+    if not force and now - st.get("last_post", 0) < POST_GAP:
+        return False
+    item = q[0]
+    path = os.path.join(POSTQUEUE_DIR, item["file"])
+    cap = item.get("caption", "")
+    if item["file"].lower().endswith((".mp4", ".mov")):
+        ok = send_channel_video(POST_CHANNEL_ID, path, cap)
+    else:
+        ok = send_channel_photo(POST_CHANNEL_ID, path, cap)
+    if ok:
+        q.pop(0)
+        save_postqueue(q)
+        st = load_poststate()
+        st["last_post"] = now
+        st["posted_total"] = st.get("posted_total", 0) + 1
+        save_poststate(st)
+        print(f"Channel post #{item['n']} lag gaya. Queue me bache: {len(q)}", flush=True)
+        aid = admin_id()
+        if aid:
+            send_message(aid, f"✅ Post #{item['n']} channel par lag gaya!\nQueue me bache posts: {len(q)}")
+        return True
+    print(f"Channel post #{item['n']} FAIL — agli pass me phir try hoga.", flush=True)
+    return False
+
+
+def poster_loop():
+    """Background channel poster — har 30 min me ek post (queue se)."""
+    while True:
+        try:
+            poster_tick()
+        except Exception as e:
+            print(f"poster loop error: {e}", flush=True)
+        time.sleep(30)
+
+
 def handle_start(chat_id, u):
     is_new, total = register_user(u)
     send_video(chat_id)
@@ -604,6 +770,30 @@ def handle_message(msg):
     u = msg.get("from", {})
     text = (msg.get("text") or "").strip()
     cmd = text.split()[0].split("@")[0].lower() if text else ""
+    # Channel posting control — sirf admin, sirf uske DM se
+    if chat_id == admin_id() and cmd in ("/poston", "/postoff", "/postnow", "/poststatus"):
+        st = load_poststate()
+        q = load_postqueue()
+        if cmd == "/poston":
+            st["on"] = True
+            st["last_post"] = 0
+            save_poststate(st)
+            send_message(chat_id, f"▶️ Channel posting ON ho gayi.\nQueue me posts: {len(q)}\nPehla post abhi jayega, phir har 30 minute me ek.")
+            poster_tick()
+        elif cmd == "/postoff":
+            st["on"] = False
+            save_poststate(st)
+            send_message(chat_id, "⏸️ Channel posting OFF ho gayi. Queue safe hai, koi post nahi jayega.")
+        elif cmd == "/postnow":
+            if not q:
+                send_message(chat_id, "Queue khaali hai — koi post nahi bacha.")
+            elif not poster_tick(force=True):
+                send_message(chat_id, "⚠️ Post nahi ho paya — thodi der baad phir try karo.")
+        elif cmd == "/poststatus":
+            last = st.get("last_post", 0)
+            last_txt = datetime.fromtimestamp(last, IST).strftime("%d %b, %I:%M %p IST") if last else "abhi tak koi nahi"
+            send_message(chat_id, f"📊 Channel Posting Status\n\nPosting: {'ON ▶️' if st.get('on') else 'OFF ⏸️'}\nQueue me bache: {len(q)}\nAb tak lage: {st.get('posted_total', 0)}\nAakhri post: {last_txt}")
+        return
     if cmd == "/start":
         handle_start(chat_id, u)
     elif cmd == "/channel":
@@ -666,6 +856,7 @@ def main():
     migrate_users()
     threading.Thread(target=health_server, daemon=True).start()
     threading.Thread(target=proof_loop, daemon=True).start()
+    threading.Thread(target=poster_loop, daemon=True).start()
     offset = load_offset()
     if offset is None:
         # Pehli baar: purana backlog skip karo — wo updates pehle ke runs me
