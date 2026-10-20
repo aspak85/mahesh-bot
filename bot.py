@@ -586,19 +586,31 @@ def load_postqueue():
     except Exception:
         q = None
     if q is None:
-        # Pehli baar: repo ke postqueue/queue.json se seed bharo
+        # Pehli baar: repo se seed bharo — queue.json pehle repo ke root me
+        # dekho, phir postqueue/ folder me (jahan bhi James ne dala ho)
         q = []
-        try:
-            with open(os.path.join(POSTQUEUE_DIR, "queue.json")) as f:
-                for item in json.load(f):
-                    q.append({"n": item["n"], "file": item["file"],
-                              "caption": item["caption"]})
-        except Exception:
-            q = []
+        for cand in (os.path.join(BASE, "queue.json"),
+                     os.path.join(POSTQUEUE_DIR, "queue.json")):
+            try:
+                with open(cand) as f:
+                    for item in json.load(f):
+                        q.append({"n": item["n"], "file": item["file"],
+                                  "caption": item["caption"]})
+                break
+            except Exception:
+                q = []
         if q:
             save_postqueue(q)
     _postqueue_cache = q
     return _postqueue_cache
+
+
+def _queue_path(name):
+    """Post ki media file ka asli path — postqueue/ me ya repo root me."""
+    p = os.path.join(POSTQUEUE_DIR, name)
+    if os.path.exists(p):
+        return p
+    return os.path.join(BASE, name)
 
 
 def save_postqueue(q):
@@ -693,7 +705,7 @@ def poster_tick(force=False):
     if not force and now - st.get("last_post", 0) < POST_GAP:
         return False
     item = q[0]
-    path = os.path.join(POSTQUEUE_DIR, item["file"])
+    path = _queue_path(item["file"])
     cap = item.get("caption", "")
     if item["file"].lower().endswith((".mp4", ".mov")):
         ok = send_channel_video(POST_CHANNEL_ID, path, cap)
