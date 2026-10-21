@@ -15,6 +15,7 @@ nahi chahiye); Render ke liye chhota health HTTP server bhi chalta hai.
 """
 import json
 import os
+import re
 import threading
 import time
 import urllib.request
@@ -426,6 +427,13 @@ def register_user(u):
             "proof_idx": 0,
             "last_proof": 0,
             "blocked": False,
+            # Onboarding (UID -> deposit -> channel), drip se alag parallel
+            "uid": None,
+            "uid_status": None,
+            "uid_asked": False,
+            "dep_status": None,
+            "dep_asked": False,
+            "chan_sent": False,
         }
     else:
         users[key]["starts"] = users[key].get("starts", 1) + 1
@@ -534,8 +542,161 @@ def send_reg_item(chat_id, users, key):
         d["reg_sent"] = True
         d["last_proof"] = time.time()
         print(f"Registration link -> user {key}", flush=True)
+        # Reg ke saath hi UID step shuru: naya user register karke aaye to
+        # UID bhej sake. (Purane users /verify se shuru kar sakte hain.)
+        if send_message(chat_id, UID_REQUEST).get("ok"):
+            d["uid_asked"] = True
         return True
     return False
+
+
+# ---------- Automated onboarding: UID -> deposit -> channel ----------
+# Flow (drip se alag, parallel chalta hai — drip kabhi nahi rukta):
+# reg -> UID request -> user UID bhejta hai -> admin /approve ->
+# deposit request (min Rs 1000) -> user screenshot bhejta hai ->
+# admin /approve -> channel invite link. UID/deposit ka automatic
+# verification possible nahi hai (1win ka public API nahi; screenshot se
+# pakka proof nahi milta), isliye dono jagah admin ka 1-tap approval hai.
+UID_REQUEST = ("✅ Register ho gaya? Ab apna 1win UID yahan bhej do — taaki hum "
+               "verify kar sakein ki tum hamare link se register hue ho.\n\n"
+               "UID tumhe 1win account me milega (profile section me).")
+UID_RECEIVED = ("✅ Tumhara UID mil gaya hai — verification ke liye bhej diya gaya hai.\n\n"
+                "Verify hote hi tumhe agla step bataya jayega, thoda wait karo.")
+UID_REJECTED = ("❌ Tumhara UID verify nahi ho paya.\n\n"
+                "Sahi UID dobara bhej do — 1win account me dikhne wala number.")
+DEP_REQUEST = ("🎉 Tumhara UID verify ho gaya hai!\n\n"
+               "Ab aage badhne ke liye minimum ₹1000 ka deposit karo, phir "
+               "deposit ka screenshot yahan bhej do.\n\n"
+               "Screenshot me amount aur date saaf dikhni chahiye.")
+DEP_RECEIVED = ("✅ Deposit screenshot mil gaya hai — verification ke liye bhej diya gaya hai.\n\n"
+                "Verify hote hi tumhe VIP channel ka link milega.")
+DEP_REJECTED = ("❌ Deposit screenshot verify nahi ho paya.\n\n"
+                "Sahi screenshot dobara bhej do — jisme amount aur date saaf dikhe.")
+CHAN_INVITE = ("🎉 Deposit verify ho gaya hai! Ab tum VIP CLUB join kar sakte ho 👇\n\n"
+               "Join karne ke baad /joined dabana, taaki hum confirm kar sakein.")
+JOINED_OK = "🎉 Welcome to Aviasoft VIP CLUB! Tum channel ke member ban gaye ho. 🔥"
+JOINED_NOT = "Tum abhi channel join nahi hue ho. Neeche diye link se join karo, phir /joined dabao 👇"
+VERIFY_PENDING_UID = "⏳ Tumhara UID verification me hai — thoda wait karo, verify hote hi bataya jayega."
+VERIFY_PENDING_DEP = "⏳ Tumhara deposit screenshot verification me hai — thoda wait karo."
+VERIFY_DEP_ASKED = "💰 Tumhara UID approved hai. Ab minimum ₹1000 ka deposit karke uska screenshot yahan bhej do."
+VERIFY_DONE = "✅ Tumhara onboarding poora ho chuka hai. Channel link ke liye /channel dabao."
+UID_RE = re.compile(r"^\d{6,14}$")
+
+
+def handle_verify(chat_id, users, key):
+    """User ka /verify — onboarding me wo kahan hai, wahi batayo ya shuru karo."""
+    d = users[key]
+    if d.get("uid_status") == "approved" and d.get("dep_status") == "approved":
+        send_message(chat_id, VERIFY_DONE)
+    elif d.get("dep_status") == "pending":
+        send_message(chat_id, VERIFY_PENDING_DEP)
+    elif d.get("uid_status") == "pending":
+        send_message(chat_id, VERIFY_PENDING_UID)
+    elif d.get("dep_asked"):
+        send_message(chat_id, VERIFY_DEP_ASKED)
+    else:
+        if send_message(chat_id, UID_REQUEST).get("ok"):
+            d["uid_asked"] = True
+            save_users(users)
+
+
+def handle_joined(chat_id, users, key):
+    """User ka /joined — channel membership check (bot channel ka admin hai)."""
+    r = api("getChatMember", {"chat_id": POST_CHANNEL_ID, "user_id": int(key)})
+    if not r.get("ok"):
+        send_message(chat_id, "Check nahi ho paya — thodi der baad /joined dobara dabao.")
+        return
+    if r["result"].get("status") in ("creator", "administrator", "member"):
+        send_message(chat_id, JOINED_OK)
+    else:
+        send_message(chat_id, JOINED_NOT, JOIN_KB)
+
+
+def handle_uid_text(chat_id, users, key, uid_text):
+    """User ne UID bheja — save karo, admin ko verification ke liye bhejo."""
+    d = users[key]
+    d["uid"] = uid_text
+    d["uid_status"] = "pending"
+    save_users(users)
+    send_message(chat_id, UID_RECEIVED)
+    aid = admin_id()
+    if aid:
+        name = d.get("name") or "—"
+        uname = "@" + d["username"] if d.get("username") else "nahi hai"
+        send_message(aid, f"🆔 UID Verification Pending\n\nName: {name}\nUser ID: {key}\nUsername: {uname}\nUID: {uid_text}\n\nApprove: /approve {key}\nReject: /reject {key}")
+
+
+def handle_deposit_photo(chat_id, users, key, msg):
+    """User ne deposit screenshot bheja — admin ko forward karo."""
+    d = users[key]
+    d["dep_status"] = "pending"
+    save_users(users)
+    send_message(chat_id, DEP_RECEIVED)
+    aid = admin_id()
+    if aid:
+        name = d.get("name") or "—"
+        uname = "@" + d["username"] if d.get("username") else "nahi hai"
+        cap = (msg.get("caption") or "").strip()
+        alert = (f"💰 Deposit Proof Pending\n\nName: {name}\nUser ID: {key}\nUsername: {uname}\nUID: {d.get('uid') or '—'}\n"
+                 + (f"User ka caption: {cap}\n" if cap else "")
+                 + f"\nApprove: /approve {key}\nReject: /reject {key}")
+        send_message(aid, alert)
+        api("forwardMessage", {"chat_id": aid, "from_chat_id": chat_id,
+                               "message_id": msg["message_id"]})
+
+
+def handle_admin_onboard(admin_chat, cmd, text):
+    """Admin ke onboarding commands: /approve, /reject, /pending, /status.
+    /approve stage-aware hai: pehle pending UID, phir pending deposit."""
+    users = load_users()
+    if cmd == "/pending":
+        lines = []
+        for uid, d in users.items():
+            if d.get("uid_status") == "pending":
+                lines.append(f"• {d.get('name') or '—'} — ID: {uid} — UID: {d.get('uid')} — Stage: UID")
+            elif d.get("dep_status") == "pending":
+                lines.append(f"• {d.get('name') or '—'} — ID: {uid} — UID: {d.get('uid')} — Stage: Deposit")
+        send_message(admin_chat, "⏳ Pending Approvals:\n\n" + "\n".join(lines) if lines else "Koi pending approval nahi hai.")
+        return
+    parts = text.split()
+    if len(parts) < 2:
+        send_message(admin_chat, f"Usage: {cmd} <user_id>  (pending dekhne ke liye /pending)")
+        return
+    target = parts[1]
+    if target not in users:
+        send_message(admin_chat, "User nahi mila — sahi ID bhejo (dekhne ke liye /pending).")
+        return
+    d = users[target]
+    if cmd == "/approve":
+        if d.get("uid_status") == "pending":
+            d["uid_status"] = "approved"
+            d["dep_asked"] = True
+            save_users(users)
+            send_message(int(target), DEP_REQUEST)
+            send_message(admin_chat, f"✅ UID approved ({target}) — user ko deposit request bhej diya.")
+        elif d.get("dep_status") == "pending":
+            d["dep_status"] = "approved"
+            d["chan_sent"] = True
+            save_users(users)
+            send_message(int(target), CHAN_INVITE, JOIN_KB)
+            send_message(admin_chat, f"✅ Deposit approved ({target}) — user ko channel invite link bhej diya.")
+        else:
+            send_message(admin_chat, f"Is user ka kuch pending nahi hai. (UID: {d.get('uid_status')}, Deposit: {d.get('dep_status')})")
+    elif cmd == "/reject":
+        if d.get("uid_status") == "pending":
+            d["uid_status"] = "rejected"
+            save_users(users)
+            send_message(int(target), UID_REJECTED)
+            send_message(admin_chat, f"❌ UID rejected ({target}) — user ko dobara bhejne ko bola gaya.")
+        elif d.get("dep_status") == "pending":
+            d["dep_status"] = "rejected"
+            save_users(users)
+            send_message(int(target), DEP_REJECTED)
+            send_message(admin_chat, f"❌ Deposit rejected ({target}) — user ko dobara bhejne ko bola gaya.")
+        else:
+            send_message(admin_chat, "Is user ka kuch pending nahi hai.")
+    elif cmd == "/status":
+        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nDrip: once {d.get('once_idx', 0)}, reg {'ho gaya' if d.get('reg_sent') else 'nahi'}, photos {d.get('proof_idx', 0)}")
 
 
 def proof_loop():
@@ -860,24 +1021,62 @@ def handle_message(msg):
             last_txt = datetime.fromtimestamp(last, IST).strftime("%d %b, %I:%M %p IST") if last else "abhi tak koi nahi"
             send_message(chat_id, f"📊 Channel Posting Status\n\nPosting: {'ON ▶️' if st.get('on') else 'OFF ⏸️'}\nQueue me bache: {len(q)}\nAb tak lage: {st.get('posted_total', 0)}\nAakhri post: {last_txt}")
         return
+    # Onboarding approvals — sirf admin, sirf uske DM se
+    if chat_id == admin_id() and cmd in ("/approve", "/reject", "/pending", "/status"):
+        handle_admin_onboard(chat_id, cmd, text)
+        return
     if cmd == "/start":
         handle_start(chat_id, u)
     elif cmd == "/channel":
         send_message(chat_id, "📢 Hamara channel join karo — event announcement pinned message ke right baad milega 👇", JOIN_KB)
     elif cmd == "/stats":
         handle_stats(chat_id)
+    elif cmd == "/verify":
+        users = load_users()
+        key = str(chat_id)
+        if key in users and not users[key].get("blocked"):
+            handle_verify(chat_id, users, key)
+        else:
+            send_message(chat_id, "Namaste 🙏 Channel join karne ke liye /start dabao — intro video aur saari details mil jayengi.", JOIN_KB)
+    elif cmd == "/joined":
+        users = load_users()
+        key = str(chat_id)
+        if key in users and not users[key].get("blocked"):
+            handle_joined(chat_id, users, key)
+        else:
+            send_message(chat_id, "Namaste 🙏 Channel join karne ke liye /start dabao — intro video aur saari details mil jayengi.", JOIN_KB)
     elif cmd == "/help":
         send_message(chat_id,
-                     "Commands:\n/start — Intro video + channel link\n/channel — Channel join link\n/help — Ye help",
+                     "Commands:\n/start — Intro video + channel link\n/channel — Channel join link\n/verify — UID verification shuru karo\n/joined — Channel join check karo\n/help — Ye help",
                      JOIN_KB)
+    elif msg.get("photo"):
+        # Deposit screenshot — sirf tab jab UID approved aur deposit manga gaya ho
+        users = load_users()
+        key = str(chat_id)
+        d = users.get(key)
+        if (d and not d.get("blocked") and chat_id != admin_id()
+                and d.get("uid_status") == "approved"
+                and d.get("dep_asked") and d.get("dep_status") != "approved"):
+            handle_deposit_photo(chat_id, users, key, msg)
+        # warna: photo ignore (pehle jaisa behaviour)
     elif text:
-        send_message(chat_id, "Namaste 🙏 Channel join karne ke liye /start dabao — intro video aur saari details mil jayengi.", JOIN_KB)
+        users = load_users()
+        key = str(chat_id)
+        d = users.get(key)
+        if (d and not d.get("blocked") and chat_id != admin_id()
+                and d.get("uid_asked") and d.get("uid_status") != "approved"
+                and UID_RE.match(text)):
+            handle_uid_text(chat_id, users, key, text)
+        else:
+            send_message(chat_id, "Namaste 🙏 Channel join karne ke liye /start dabao — intro video aur saari details mil jayengi.", JOIN_KB)
 
 
 def setup():
     api("setMyCommands", {"commands": [
         {"command": "start", "description": "Start — intro video & channel"},
         {"command": "channel", "description": "Join the channel"},
+        {"command": "verify", "description": "UID verification shuru karo"},
+        {"command": "joined", "description": "Channel join check karo"},
         {"command": "help", "description": "Help"},
     ]})
     api("setMyDescription", {"description": DESCRIPTION})
