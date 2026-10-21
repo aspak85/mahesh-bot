@@ -43,6 +43,10 @@ POST_GAP = 1800        # channel posts ke beech 30 minute ka gap
 POSTQUEUE_DIR = os.path.join(BASE, "postqueue")
 POSTQUEUE_FILE = os.path.join(BASE, "postqueue.json")
 POSTSTATE_FILE = os.path.join(BASE, "poststate.json")
+# Purani queue (#1-#6) channel par ja chuki hai — inhe kabhi dobara
+# seed/sync mat karo, warna repeat posts jayenge. Naye posts hamesha
+# isse bade number (n) se aayenge, aur sync sirf wahi jodta hai.
+POSTQUEUE_BASELINE_N = 6
 
 CHANNEL_URL = "https://t.me/+ZJOQDxH9C985Mzdl"
 
@@ -587,15 +591,18 @@ def load_postqueue():
         q = None
     if q is None:
         # Pehli baar: repo se seed bharo — queue.json pehle repo ke root me
-        # dekho, phir postqueue/ folder me (jahan bhi James ne dala ho)
+        # dekho, phir postqueue/ folder me (jahan bhi James ne dala ho).
+        # Baseline se purane items (#1-#6) kabhi dobara seed mat karo —
+        # wo channel par ja chuke hain, seed sirf naye posts ke liye hai.
         q = []
         for cand in (os.path.join(BASE, "queue.json"),
                      os.path.join(POSTQUEUE_DIR, "queue.json")):
             try:
                 with open(cand) as f:
                     for item in json.load(f):
-                        q.append({"n": item["n"], "file": item["file"],
-                                  "caption": item["caption"]})
+                        if item.get("n", 0) > POSTQUEUE_BASELINE_N:
+                            q.append({"n": item["n"], "file": item["file"],
+                                      "caption": item["caption"]})
                 break
             except Exception:
                 q = []
@@ -632,6 +639,7 @@ def load_poststate():
     _poststate_cache.setdefault("on", True)
     _poststate_cache.setdefault("last_post", 0)
     _poststate_cache.setdefault("posted_total", 0)
+    _poststate_cache.setdefault("seen_max", 0)
     if fresh:
         # AUTO posting: pehla post deploy ke ~2 minute baad jaye,
         # phir har 30 min me ek (last_post peeche rakhke gap ghata diya)
@@ -644,6 +652,46 @@ def save_poststate(s):
     global _poststate_cache
     _poststate_cache = s
     store_set("poststate", POSTSTATE_FILE, json.dumps(s))
+
+
+def sync_postqueue_from_seed():
+    """Repo ki queue.json me jo NAYE items aaye (n > baseline aur n >
+    seen_max), unhe live queue ke aakhir me jodo. Isse James jab bhi
+    naya post queue.json me daalega, wo apne aap live queue me jud
+    jayega — aur purane posts (#1-#6) kabhi dobara nahi judenge."""
+    try:
+        seed = None
+        for cand in (os.path.join(BASE, "queue.json"),
+                     os.path.join(POSTQUEUE_DIR, "queue.json")):
+            try:
+                with open(cand) as f:
+                    seed = json.load(f)
+                break
+            except Exception:
+                seed = None
+        if not seed:
+            return
+        q = load_postqueue()
+        st = load_poststate()
+        seen = max(st.get("seen_max", 0), POSTQUEUE_BASELINE_N,
+                   max((x["n"] for x in q), default=0))
+        have = {x["n"] for x in q}
+        added = False
+        for item in seed:
+            n = item.get("n")
+            if n is None or n <= seen or n in have:
+                continue
+            q.append({"n": n, "file": item["file"],
+                      "caption": item["caption"]})
+            have.add(n)
+            added = True
+        if added:
+            save_postqueue(q)
+            print(f"Queue sync: naye posts jud gaye, queue ab {len(q)}", flush=True)
+        st["seen_max"] = max(seen, max((x["n"] for x in q), default=seen))
+        save_poststate(st)
+    except Exception as e:
+        print(f"queue sync error: {e}", flush=True)
 
 
 def send_channel_photo(chat_id, path, caption):
@@ -720,6 +768,7 @@ def poster_tick(force=False):
         st = load_poststate()
         st["last_post"] = now
         st["posted_total"] = st.get("posted_total", 0) + 1
+        st["seen_max"] = max(st.get("seen_max", 0), item["n"])
         save_poststate(st)
         print(f"Channel post #{item['n']} lag gaya. Queue me bache: {len(q)}", flush=True)
         aid = admin_id()
@@ -731,9 +780,11 @@ def poster_tick(force=False):
 
 
 def poster_loop():
-    """Background channel poster — har 30 min me ek post (queue se)."""
+    """Background channel poster — har 30 min me ek post (queue se).
+    Har pass se pehle queue.json se naye posts sync karo."""
     while True:
         try:
+            sync_postqueue_from_seed()
             poster_tick()
         except Exception as e:
             print(f"poster loop error: {e}", flush=True)
