@@ -52,6 +52,14 @@ POSTQUEUE_BASELINE_N = 6
 CHANNEL_URL = "https://t.me/+ZJOQDxH9C985Mzdl"
 REG_URL = "https://1wxnxg.life/betting?p=b0nq&sharebet=MAHESH85"
 
+# VIP Group (sirf deposit karne walon ke liye) — James ne banaya, bot admin hai
+VIP_URL = "https://t.me/+iy-R5QLgp8xkZGRl"
+VIP_KB = {"inline_keyboard": [[{"text": "🔥 Join VIP Group", "url": VIP_URL}]]}
+# VIP group ka numeric chat ID — env se, ya bot ke seekhne ke baad store se.
+# Bot ise khud seekh leta hai: group me add hote hi, koi member join karte
+# hi, ya James ke group message forward karne par.
+VIP_ID_FILE = os.path.join(BASE, "vip_id.txt")
+
 PROOF_GAP = 10800      # purane drip ke items ke beech 3 ghante (legacy)
 
 # Intro video ka caption — James ke shabd same, sirf link ka style badla:
@@ -627,10 +635,10 @@ DEP_RECEIVED = ("✅ Deposit screenshot mil gaya hai — verification ke liye bh
                 "Verify hote hi tumhe VIP channel ka link milega.")
 DEP_REJECTED = ("❌ Deposit screenshot verify nahi ho paya.\n\n"
                 "Sahi screenshot dobara bhej do — jisme amount aur date saaf dikhe.")
-CHAN_INVITE = ("🎉 Deposit verify ho gaya hai! Ab tum VIP CLUB join kar sakte ho 👇\n\n"
+CHAN_INVITE = ("🎉 Deposit verify ho gaya hai! Ab tum VIP GROUP join kar sakte ho 👇\n\n"
                "Join karne ke baad /joined dabana, taaki hum confirm kar sakein.")
-JOINED_OK = "🎉 Welcome to Aviasoft VIP CLUB! Tum channel ke member ban gaye ho. 🔥"
-JOINED_NOT = "Tum abhi channel join nahi hue ho. Neeche diye link se join karo, phir /joined dabao 👇"
+JOINED_OK = "🎉 Welcome to VIP GROUP! Tum VIP group ke member ban gaye ho. 🔥"
+JOINED_NOT = "Tum abhi VIP group join nahi hue ho. Neeche diye link se join karo, phir /joined dabao 👇"
 VERIFY_PENDING_UID = "⏳ Tumhara UID verification me hai — thoda wait karo, verify hote hi bataya jayega."
 VERIFY_PENDING_DEP = "⏳ Tumhara deposit screenshot verification me hai — thoda wait karo."
 VERIFY_DEP_ASKED = "💰 Tumhara UID approved hai. Ab minimum ₹1000 ka deposit karke uska screenshot yahan bhej do."
@@ -655,16 +663,55 @@ def handle_verify(chat_id, users, key):
             save_users(users)
 
 
+def get_vip_chat_id():
+    """VIP group ka chat ID: pehle env, phir stored value, warna None."""
+    v = os.environ.get("VIP_CHAT_ID", "").strip()
+    if v:
+        try:
+            return int(v)
+        except ValueError:
+            pass
+    raw = store_get("vipchat", VIP_ID_FILE)
+    if raw:
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def learn_vip_chat_id(chat):
+    """Group update/forward se VIP group ka ID seekho — sirf pehli baar save
+    hota hai. Bot sirf 2 jagah hai (purana channel + VIP group), isliye
+    purane channel ke alawa koi bhi group chat VIP group hi hai."""
+    if not chat or chat.get("type") not in ("group", "supergroup"):
+        return False
+    cid = chat.get("id")
+    if not cid or cid == POST_CHANNEL_ID:
+        return False
+    if get_vip_chat_id() is not None:
+        return False
+    store_set("vipchat", VIP_ID_FILE, str(cid))
+    print(f"VIP group ID seekha: {cid}", flush=True)
+    return True
+
+
 def handle_joined(chat_id, users, key):
-    """User ka /joined — channel membership check (bot channel ka admin hai)."""
-    r = api("getChatMember", {"chat_id": POST_CHANNEL_ID, "user_id": int(key)})
+    """User ka /joined — VIP group membership check (bot VIP group ka admin hai).
+    Agar group ID abhi pata nahi hai (bot ne abhi tak seekha nahi), to user
+    ke /joined dabane ko hi join maan lo — deposit approval hi asli gate hai."""
+    vip_id = get_vip_chat_id()
+    if not vip_id:
+        send_message(chat_id, JOINED_OK)
+        return
+    r = api("getChatMember", {"chat_id": vip_id, "user_id": int(key)})
     if not r.get("ok"):
         send_message(chat_id, "Check nahi ho paya — thodi der baad /joined dobara dabao.")
         return
     if r["result"].get("status") in ("creator", "administrator", "member"):
         send_message(chat_id, JOINED_OK)
     else:
-        send_message(chat_id, JOINED_NOT, JOIN_KB)
+        send_message(chat_id, JOINED_NOT, VIP_KB)
 
 
 def handle_uid_text(chat_id, users, key, uid_text):
@@ -733,8 +780,8 @@ def handle_admin_onboard(admin_chat, cmd, text):
             d["dep_status"] = "approved"
             d["chan_sent"] = True
             save_users(users)
-            send_message(int(target), CHAN_INVITE, JOIN_KB)
-            send_message(admin_chat, f"✅ Deposit approved ({target}) — user ko channel invite link bhej diya.")
+            send_message(int(target), CHAN_INVITE, VIP_KB)
+            send_message(admin_chat, f"✅ Deposit approved ({target}) — user ko VIP group link bhej diya.")
         else:
             send_message(admin_chat, f"Is user ka kuch pending nahi hai. (UID: {d.get('uid_status')}, Deposit: {d.get('dep_status')})")
     elif cmd == "/reject":
@@ -751,7 +798,7 @@ def handle_admin_onboard(admin_chat, cmd, text):
         else:
             send_message(admin_chat, "Is user ka kuch pending nahi hai.")
     elif cmd == "/status":
-        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nJourney: {d.get('j_stage', '—')} (idx {d.get('j_idx', 0)})")
+        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nVIP link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nJourney: {d.get('j_stage', '—')} (idx {d.get('j_idx', 0)})")
 
 
 def send_tail_item(chat_id, users, key, item):
@@ -1127,6 +1174,10 @@ def handle_message(msg):
     u = msg.get("from", {})
     text = (msg.get("text") or "").strip()
     cmd = text.split()[0].split("@")[0].lower() if text else ""
+    # VIP group ka ID seekhna: James koi VIP group message bot ko forward kare
+    # to uske forward_from_chat se group ID mil jata hai
+    if msg.get("forward_from_chat"):
+        learn_vip_chat_id(msg["forward_from_chat"])
     # Channel posting control — sirf admin, sirf uske DM se
     if chat_id == admin_id() and cmd in ("/poston", "/postoff", "/postnow", "/poststatus"):
         st = load_poststate()
@@ -1267,10 +1318,16 @@ def main():
     while True:
         try:
             r = api("getUpdates", {"offset": offset, "timeout": 0,
-                                   "allowed_updates": ["message"]}, retries=1)
+                                   "allowed_updates": ["message", "chat_member",
+                                                       "my_chat_member"]}, retries=1)
             if r.get("ok"):
                 for upd in r["result"]:
                     offset = upd["update_id"] + 1
+                    # VIP group ka ID seekhna: bot ko group me add karne ya
+                    # kisi member ke join/leave par ye updates aate hain
+                    for ev in ("chat_member", "my_chat_member"):
+                        if ev in upd:
+                            learn_vip_chat_id(upd[ev].get("chat"))
                     msg = upd.get("message")
                     if msg:
                         try:
