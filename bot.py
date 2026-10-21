@@ -330,13 +330,15 @@ def send_photo(chat_id, path, caption):
 
 
 def load_sequence():
-    """proofs/ folder se do lists (order file naam se):
+    """proofs/ folder se teen lists (order file naam se):
     - once_items: har user ko SIRF EK BAAR jane wale — text-only files
       ("text", content) aur videos ("video", path, caption)
     - photos: [(path, caption)] — drip me har ek sirf ek baar jata hai;
-      caption same-naam .txt se, warna channel-link caption."""
+      caption same-naam .txt se, warna channel-link caption.
+    - tail: 'tail-' se shuru hone wale items — drip ke AAKHIR me jaate hain
+      (reg + photos ke baad). ('video'/'photo'/'text', path/content, caption)"""
     if not os.path.isdir(PROOFS_DIR):
-        return [], []
+        return [], [], []
     imgs, vids, texts = {}, {}, {}
     for f in os.listdir(PROOFS_DIR):
         stem, ext = os.path.splitext(f)
@@ -347,17 +349,23 @@ def load_sequence():
             vids[stem] = os.path.join(PROOFS_DIR, f)
         elif ext == ".txt":
             texts[stem] = os.path.join(PROOFS_DIR, f)
-    once, photos = [], []
+    once, photos, tail = [], [], []
     for stem in sorted(set(imgs) | set(vids) | set(texts)):
-        if stem in imgs:
-            cap = open(texts[stem]).read().strip() if stem in texts else ""
+        cap = open(texts[stem]).read().strip() if stem in texts else ""
+        if stem.startswith("tail-"):
+            if stem in imgs:
+                tail.append(("photo", imgs[stem], cap or LINK_CAPTION))
+            elif stem in vids:
+                tail.append(("video", vids[stem], cap or LINK_CAPTION))
+            else:
+                tail.append(("text", cap, ""))
+        elif stem in imgs:
             photos.append((imgs[stem], cap or LINK_CAPTION))
         elif stem in vids:
-            cap = open(texts[stem]).read().strip() if stem in texts else ""
             once.append(("video", vids[stem], cap or LINK_CAPTION))
         else:
             once.append(("text", open(texts[stem]).read().strip(), ""))
-    return once, photos
+    return once, photos, tail
 
 
 def load_offset():
@@ -425,6 +433,7 @@ def register_user(u):
             "once_idx": 0,
             "reg_sent": False,
             "proof_idx": 0,
+            "tail_idx": 0,
             "last_proof": 0,
             "blocked": False,
             # Onboarding (UID -> deposit -> channel), drip se alag parallel
@@ -696,18 +705,43 @@ def handle_admin_onboard(admin_chat, cmd, text):
         else:
             send_message(admin_chat, "Is user ka kuch pending nahi hai.")
     elif cmd == "/status":
-        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nDrip: once {d.get('once_idx', 0)}, reg {'ho gaya' if d.get('reg_sent') else 'nahi'}, photos {d.get('proof_idx', 0)}")
+        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nDrip: once {d.get('once_idx', 0)}, reg {'ho gaya' if d.get('reg_sent') else 'nahi'}, photos {d.get('proof_idx', 0)}, tail {d.get('tail_idx', 0)}")
+
+
+def send_tail_item(chat_id, users, key, item):
+    """Tail item (drip ke aakhir me) bhejo — har user ko sirf ek baar.
+    users dict in-place update. Return True agar state change hua."""
+    d = users[key]
+    kind = item[0]
+    if kind == "video":
+        res = send_video_file(chat_id, item[1], item[2])
+    elif kind == "photo":
+        res = send_photo(chat_id, item[1], item[2])
+    else:
+        res = send_text_item(chat_id, item[1])
+    if res == "blocked":
+        d["blocked"] = True
+        d["tail_idx"] = d.get("tail_idx", 0) + 1
+        print(f"User {key} ne bot block kiya — drip band.", flush=True)
+        return True
+    if res:
+        d["tail_idx"] = d.get("tail_idx", 0) + 1
+        d["last_proof"] = time.time()
+        print(f"Tail item #{d['tail_idx']} ({kind}) -> user {key}", flush=True)
+        return True
+    return False
 
 
 def proof_loop():
     """Background drip — kuch bhi repeat nahi hota. Order per user:
     one-time items (intro, proof videos, pitch) -> registration link ->
-    proof photos (har ek sirf ek baar). Items ke beech 3 ghante ka gap.
+    proof photos (har ek sirf ek baar) -> tail items (drip ke aakhir me).
+    Items ke beech 3 ghante ka gap.
     State users.json me — restart ke baad bhi wahin se aage badhta hai."""
     while True:
         try:
-            once, photos = load_sequence()
-            if once or photos:
+            once, photos, tail = load_sequence()
+            if once or photos or tail:
                 users = load_users()
                 changed = False
                 now = time.time()
@@ -728,6 +762,9 @@ def proof_loop():
                         continue
                     if photos and d.get("proof_idx", 0) < len(photos) and due:
                         if send_next_photo(int(key), users, key, photos):
+                            changed = True
+                    elif tail and d.get("tail_idx", 0) < len(tail) and due:
+                        if send_tail_item(int(key), users, key, tail[d.get("tail_idx", 0)]):
                             changed = True
                 if changed:
                     save_users(users)
@@ -959,7 +996,7 @@ def handle_start(chat_id, u):
         notify_admin(u, total)
         print(f"NEW subscriber: {u.get('id')} @{u.get('username', '')} (total {total})", flush=True)
         # Welcome ke turant baad: intro text + pehla proof video (one-time items)
-        once, photos = load_sequence()
+        once, photos, tail = load_sequence()
         users = load_users()
         key = str(u["id"])
         if key in users and not users[key].get("blocked"):
