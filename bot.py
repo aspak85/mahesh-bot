@@ -647,10 +647,11 @@ def save_poststate(s):
 
 
 def send_channel_photo(chat_id, path, caption):
-    """Channel par photo + caption (koi button nahi — caption me hi links)."""
+    """Channel par photo + caption. Caption me shabd hi link hote hain
+    (HTML parse_mode) — koi lambi link text me nahi dikhti."""
     for i in range(4):
         try:
-            fields = {"chat_id": str(chat_id)}
+            fields = {"chat_id": str(chat_id), "parse_mode": "HTML"}
             if caption:
                 fields["caption"] = caption
             r = _multipart("sendPhoto", fields, "photo", path, timeout=60)
@@ -667,7 +668,8 @@ def send_channel_video(chat_id, path, caption):
     """Channel par video + caption. Pehle file_id se (instant), warna upload."""
     fid = _file_id(path)
     if fid:
-        p = {"chat_id": chat_id, "video": fid, "supports_streaming": True}
+        p = {"chat_id": chat_id, "video": fid, "supports_streaming": True,
+             "parse_mode": "HTML"}
         if caption:
             p["caption"] = caption
         r = api("sendVideo", p, retries=2)
@@ -675,7 +677,8 @@ def send_channel_video(chat_id, path, caption):
             return True
     for i in range(4):
         try:
-            fields = {"chat_id": str(chat_id), "supports_streaming": "true"}
+            fields = {"chat_id": str(chat_id), "supports_streaming": "true",
+                      "parse_mode": "HTML"}
             if caption:
                 fields["caption"] = caption
             r = _multipart("sendVideo", fields, "video", path, timeout=180)
