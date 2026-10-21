@@ -50,14 +50,18 @@ POSTSTATE_FILE = os.path.join(BASE, "poststate.json")
 POSTQUEUE_BASELINE_N = 6
 
 CHANNEL_URL = "https://t.me/+ZJOQDxH9C985Mzdl"
+REG_URL = "https://1wxnxg.life/betting?p=b0nq&sharebet=MAHESH85"
 
-PROOF_GAP = 10800      # drip items ke beech 3 ghante — kuch bhi repeat nahi hota
+PROOF_GAP = 10800      # purane drip ke items ke beech 3 ghante (legacy)
 
+# Intro video ka caption — James ke shabd same, sirf link ka style badla:
+# khuli URL nahi, reg + channel dono shabd hi link hain
 WELCOME_TEXT = (
     "Make sure to subscribe to my channel\n"
     "I'm documenting my journey to 10,00,0000 rupees LIVE.\n"
     "You'll find the event announcement right after the pinned message in the channel👇🏽🚀\n\n"
-    + CHANNEL_URL
+    "🟢 <a href=\"" + REG_URL + "\">Register Now</a>\n"
+    "📢 <a href=\"" + CHANNEL_URL + "\">Join Channel</a>"
 )
 
 JOIN_KB = {"inline_keyboard": [[{"text": "📢 Join Channel", "url": CHANNEL_URL}]]}
@@ -65,11 +69,40 @@ JOIN_KB = {"inline_keyboard": [[{"text": "📢 Join Channel", "url": CHANNEL_URL
 # Har proof photo ke niche ye caption (channel link ke saath) jayega
 LINK_CAPTION = "Join my channel 👇🏽🚀\n" + CHANNEL_URL
 
-# Registration link (James ne diya) — pitch ke baad har subscriber ko ek baar,
-# Register Now button ke saath
-REG_URL = "https://1wxnxg.life/betting?p=b0nq&sharebet=MAHESH85"
+# Registration link (James ne diya) — Register Now button ke saath
 REG_TEXT = "🎰 Register Now — abhi apna account banao aur shuru karo 👇\n\n" + REG_URL
 REG_KB = {"inline_keyboard": [[{"text": "🟢 Register Now", "url": REG_URL}]]}
+
+# Winning proofs + reminders ke niche ye caption (reg link, shabd hi link)
+REG_CAPTION = "🏆 THIS IS THE WINNING OF OUR CUSTOMERS 🏆\n\n🟢 <a href=\"" + REG_URL + "\">Register Now</a>"
+
+# ---------- Naya subscriber journey (2026-10-21, James ka exact spec) ----------
+# Order: intro video (start par, caption me reg+channel word-links) ->
+# feedback photo -> winning proofs (REG link ke saath, 10-min gap) ->
+# UID request text -> reminders (10-min gap, jab tak UID na mile).
+# Reminder pool: winning proofs, withdrawal proof, videos — kuch na kuch
+# har 10 min me jana hi chahiye, koi gap nahi.
+JOURNEY_GAP = 600       # winning proofs ke beech 10 minute
+REMIND_GAP = 600        # reminders ke beech 10 minute
+FEEDBACK_PHOTO = os.path.join(PROOFS_DIR, "proof-01.jpg")
+JOURNEY_PROOFS = [
+    os.path.join(PROOFS_DIR, f) for f in
+    ("proof-02.jpg", "proof-03.jpg", "proof-04.jpg",
+     "proof-08.jpg", "proof-09.jpg", "tail-02.jpg")
+]
+REMIND_POOL = [
+    ("photo", os.path.join(PROOFS_DIR, "proof-02.jpg")),
+    ("photo", os.path.join(PROOFS_DIR, "proof-03.jpg")),
+    ("photo", os.path.join(PROOFS_DIR, "proof-04.jpg")),
+    ("photo", os.path.join(PROOFS_DIR, "proof-08.jpg")),
+    ("photo", os.path.join(PROOFS_DIR, "proof-09.jpg")),
+    ("photo", os.path.join(PROOFS_DIR, "tail-02.jpg")),
+    ("video", os.path.join(PROOFS_DIR, "proof-05.mp4")),
+    ("video", os.path.join(PROOFS_DIR, "proof-06.mp4")),
+    ("video", os.path.join(PROOFS_DIR, "tail-01.mp4")),
+    ("photo", os.path.join(PROOFS_DIR, "remind-01.jpg")),
+    ("video", os.path.join(PROOFS_DIR, "remind-02.mp4")),
+]
 
 DESCRIPTION = (
     "Welcome to Mahesh's official bot 🚀\n"
@@ -206,10 +239,12 @@ def health_server():
     HTTPServer(("0.0.0.0", port), H).serve_forever()
 
 
-def send_message(chat_id, text, kb=None):
+def send_message(chat_id, text, kb=None, parse_mode=None):
     p = {"chat_id": chat_id, "text": text}
     if kb:
         p["reply_markup"] = kb
+    if parse_mode:
+        p["parse_mode"] = parse_mode
     return api("sendMessage", p)
 
 
@@ -242,11 +277,13 @@ def _cache_file_id(path, fid):
     store_set("fileids", FILEID_FILE, json.dumps(cache))
 
 
-def _send_video_by_id(chat_id, fid, caption):
+def _send_video_by_id(chat_id, fid, caption, parse_mode=None):
     p = {"chat_id": chat_id, "video": fid, "supports_streaming": True,
          "reply_markup": JOIN_KB}
     if caption:
         p["caption"] = caption
+    if parse_mode:
+        p["parse_mode"] = parse_mode
     return api("sendVideo", p, retries=2)
 
 
@@ -255,13 +292,14 @@ def send_video(chat_id):
     Pehle file_id se (instant), warna upload karke file_id cache karo."""
     fid = _file_id(VIDEO)
     if fid:
-        r = _send_video_by_id(chat_id, fid, WELCOME_TEXT)
+        r = _send_video_by_id(chat_id, fid, WELCOME_TEXT, "HTML")
         if r.get("ok"):
             return True
     for i in range(4):
         try:
             r = _multipart("sendVideo",
                            {"chat_id": str(chat_id), "caption": WELCOME_TEXT,
+                            "parse_mode": "HTML",
                             "supports_streaming": "true",
                             "reply_markup": json.dumps(JOIN_KB)},
                            "video", VIDEO, timeout=90)
@@ -275,7 +313,7 @@ def send_video(chat_id):
             print(f"sendVideo try {i + 1}/4 failed: {e}", flush=True)
         time.sleep(3)
     # Fallback: sirf text bhej do taaki user khali na jaye
-    send_message(chat_id, WELCOME_TEXT, JOIN_KB)
+    send_message(chat_id, WELCOME_TEXT, JOIN_KB, "HTML")
     return False
 
 
@@ -284,7 +322,7 @@ def send_video_file(chat_id, path, caption):
     Pehle file_id se bhejo (instant) — upload sirf pehli baar hota hai."""
     fid = _file_id(path)
     if fid:
-        r = _send_video_by_id(chat_id, fid, caption)
+        r = _send_video_by_id(chat_id, fid, caption, "HTML")
         if r.get("ok"):
             return True
         if r.get("error_code") == 403:
@@ -292,6 +330,7 @@ def send_video_file(chat_id, path, caption):
     for i in range(4):
         try:
             fields = {"chat_id": str(chat_id), "supports_streaming": "true",
+                      "parse_mode": "HTML",
                       "reply_markup": json.dumps(JOIN_KB)}
             if caption:
                 fields["caption"] = caption
@@ -314,7 +353,8 @@ def send_photo(chat_id, path, caption):
     """Proof image + caption. Return: True / False / 'blocked'."""
     for i in range(4):
         try:
-            fields = {"chat_id": str(chat_id), "reply_markup": json.dumps(JOIN_KB)}
+            fields = {"chat_id": str(chat_id), "parse_mode": "HTML",
+                      "reply_markup": json.dumps(JOIN_KB)}
             if caption:
                 fields["caption"] = caption
             r = _multipart("sendPhoto", fields, "photo", path, timeout=60)
@@ -330,7 +370,9 @@ def send_photo(chat_id, path, caption):
 
 
 def load_sequence():
-    """proofs/ folder se teen lists (order file naam se):
+    """NOTE: purana 3h drip (once/photos/tail) naye journey se replace ho
+    gaya — ye function ab journey me use nahi hota (legacy ke liye rakha hai).
+    proofs/ folder se teen lists (order file naam se):
     - once_items: har user ko SIRF EK BAAR jane wale — text-only files
       ("text", content) aur videos ("video", path, caption)
     - photos: [(path, caption)] — drip me har ek sirf ek baar jata hai;
@@ -436,10 +478,14 @@ def register_user(u):
             "tail_idx": 0,
             "last_proof": 0,
             "blocked": False,
-            # Onboarding (UID -> deposit -> channel), drip se alag parallel
+            # Naya journey: intro (start par) -> feedback -> proofs -> reminders
+            "j_stage": "feedback",
+            "j_idx": 0,
+            "j_last": 0,
+            # Onboarding (UID -> deposit -> channel), journey se alag parallel
             "uid": None,
             "uid_status": None,
-            "uid_asked": False,
+            "uid_asked": True,
             "dep_status": None,
             "dep_asked": False,
             "chan_sent": False,
@@ -705,7 +751,7 @@ def handle_admin_onboard(admin_chat, cmd, text):
         else:
             send_message(admin_chat, "Is user ka kuch pending nahi hai.")
     elif cmd == "/status":
-        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nDrip: once {d.get('once_idx', 0)}, reg {'ho gaya' if d.get('reg_sent') else 'nahi'}, photos {d.get('proof_idx', 0)}, tail {d.get('tail_idx', 0)}")
+        send_message(admin_chat, f"👤 {d.get('name') or '—'} (@{d.get('username') or '—'})\nID: {target}\nUID: {d.get('uid') or '—'} ({d.get('uid_status') or 'nahi diya'})\nDeposit: {d.get('dep_status') or 'nahi diya'}\nChannel link: {'bheja gaya' if d.get('chan_sent') else 'nahi bheja'}\nJourney: {d.get('j_stage', '—')} (idx {d.get('j_idx', 0)})")
 
 
 def send_tail_item(chat_id, users, key, item):
@@ -732,44 +778,92 @@ def send_tail_item(chat_id, users, key, item):
     return False
 
 
-def proof_loop():
-    """Background drip — kuch bhi repeat nahi hota. Order per user:
-    one-time items (intro, proof videos, pitch) -> registration link ->
-    proof photos (har ek sirf ek baar) -> tail items (drip ke aakhir me).
-    Items ke beech 3 ghante ka gap.
-    State users.json me — restart ke baad bhi wahin se aage badhta hai."""
+def journey_tick():
+    """Naya subscriber journey — ek pass (har 30s me ek baar chalta hai).
+    Order per user: intro video (start par) -> feedback photo ->
+    winning proofs (REG link ke saath, 10-min gap) -> UID request text ->
+    reminders (10-min gap, jab tak UID na mile; UID milte hi band).
+    Purane users (jinke paas journey state nahi) migrate hote hain: UID
+    de chuke ho to 'done', warna 'remind' (unhe purana sequence dobara
+    nahi bheja jata)."""
+    try:
+        users = load_users()
+        changed = False
+        now = time.time()
+        for key, d in list(users.items()):
+            if d.get("blocked"):
+                continue
+            # Migration: purane users ko naye journey me daalo
+            if "j_stage" not in d:
+                d["uid_asked"] = True
+                if d.get("uid") is not None:
+                    d["j_stage"] = "done"
+                else:
+                    d["j_stage"] = "remind"
+                    d["j_idx"] = 0
+                    d["j_last"] = now
+                changed = True
+                continue
+            st = d.get("j_stage")
+            if st == "feedback":
+                res = send_photo(int(key), FEEDBACK_PHOTO, LINK_CAPTION)
+                if res == "blocked":
+                    d["blocked"] = True
+                    changed = True
+                elif res:
+                    d["j_stage"] = "proofs"
+                    d["j_idx"] = 0
+                    d["j_last"] = now
+                    changed = True
+            elif st == "proofs":
+                idx = d.get("j_idx", 0)
+                if idx >= len(JOURNEY_PROOFS):
+                    # Proofs khatam -> UID request bhejkar reminders shuru
+                    d["j_stage"] = "remind"
+                    d["j_idx"] = 0
+                    d["j_last"] = now
+                    changed = True
+                    if d.get("uid") is None:
+                        res = send_text_item(int(key), UID_REQUEST)
+                        if res == "blocked":
+                            d["blocked"] = True
+                elif now - d.get("j_last", 0) >= JOURNEY_GAP:
+                    res = send_photo(int(key), JOURNEY_PROOFS[idx], REG_CAPTION)
+                    if res == "blocked":
+                        d["blocked"] = True
+                        changed = True
+                    elif res:
+                        d["j_idx"] = idx + 1
+                        d["j_last"] = now
+                        changed = True
+            elif st == "remind":
+                if d.get("uid") is not None:
+                    d["j_stage"] = "done"
+                    changed = True
+                elif now - d.get("j_last", 0) >= REMIND_GAP:
+                    kind, path = REMIND_POOL[d.get("j_idx", 0) % len(REMIND_POOL)]
+                    if kind == "video":
+                        res = send_video_file(int(key), path, REG_CAPTION)
+                    else:
+                        res = send_photo(int(key), path, REG_CAPTION)
+                    if res == "blocked":
+                        d["blocked"] = True
+                        changed = True
+                    elif res:
+                        d["j_idx"] = d.get("j_idx", 0) + 1
+                        d["j_last"] = now
+                        changed = True
+            # st == "done": kuch nahi (onboarding sambhalta hai)
+        if changed:
+            save_users(users)
+    except Exception as e:
+        print(f"journey tick error: {e}", flush=True)
+
+
+def journey_loop():
+    """Journey loop — har 30s me journey_tick chalao."""
     while True:
-        try:
-            once, photos, tail = load_sequence()
-            if once or photos or tail:
-                users = load_users()
-                changed = False
-                now = time.time()
-                for key, d in list(users.items()):
-                    if d.get("blocked"):
-                        continue
-                    due = now - d.get("last_proof", 0) >= PROOF_GAP
-                    oi = d.get("once_idx", 0)
-                    if oi < len(once):
-                        # Pehla once item turant, baaki 3-ghante gap par
-                        if oi == 0 or due:
-                            if send_once_item(int(key), users, key, once[oi]):
-                                changed = True
-                        continue
-                    if not d.get("reg_sent"):
-                        if due and send_reg_item(int(key), users, key):
-                            changed = True
-                        continue
-                    if photos and d.get("proof_idx", 0) < len(photos) and due:
-                        if send_next_photo(int(key), users, key, photos):
-                            changed = True
-                    elif tail and d.get("tail_idx", 0) < len(tail) and due:
-                        if send_tail_item(int(key), users, key, tail[d.get("tail_idx", 0)]):
-                            changed = True
-                if changed:
-                    save_users(users)
-        except Exception as e:
-            print(f"proof loop error: {e}", flush=True)
+        journey_tick()
         time.sleep(30)
 
 
@@ -995,20 +1089,19 @@ def handle_start(chat_id, u):
     if is_new:
         notify_admin(u, total)
         print(f"NEW subscriber: {u.get('id')} @{u.get('username', '')} (total {total})", flush=True)
-        # Welcome ke turant baad: intro text + pehla proof video (one-time items)
-        once, photos, tail = load_sequence()
+        # Intro video ke turant baad feedback photo (welcome package) —
+        # fail ho to journey loop agle tick me phir bhejega
         users = load_users()
         key = str(u["id"])
         if key in users and not users[key].get("blocked"):
-            changed = False
-            for _ in range(min(2, len(once))):
-                oi = users[key].get("once_idx", 0)
-                if oi >= len(once):
-                    break
-                if not send_once_item(chat_id, users, key, once[oi]):
-                    break
-                changed = True
-            if changed:
+            res = send_photo(chat_id, FEEDBACK_PHOTO, LINK_CAPTION)
+            if res == "blocked":
+                users[key]["blocked"] = True
+                save_users(users)
+            elif res:
+                users[key]["j_stage"] = "proofs"
+                users[key]["j_idx"] = 0
+                users[key]["j_last"] = time.time()
                 save_users(users)
 
 
@@ -1157,7 +1250,7 @@ def main():
     setup()
     migrate_users()
     threading.Thread(target=health_server, daemon=True).start()
-    threading.Thread(target=proof_loop, daemon=True).start()
+    threading.Thread(target=journey_loop, daemon=True).start()
     threading.Thread(target=poster_loop, daemon=True).start()
     offset = load_offset()
     if offset is None:
