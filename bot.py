@@ -1034,19 +1034,20 @@ def sync_postqueue_from_seed():
 
 
 def send_channel_photo(chat_id, path, caption):
-    """Channel par photo + caption. Caption me shabd hi link hote hain
-    (HTML parse_mode) — koi lambi link text me nahi dikhti."""
+    """Channel par photo + caption, BINA compression ke (sendDocument) —
+    taaki text wale screenshot ka text saaf dikhe. Caption me shabd hi
+    link hote hain (HTML parse_mode) — koi lambi link text me nahi dikhti."""
     for i in range(4):
         try:
             fields = {"chat_id": str(chat_id), "parse_mode": "HTML"}
             if caption:
                 fields["caption"] = caption
-            r = _multipart("sendPhoto", fields, "photo", path, timeout=60)
+            r = _multipart("sendDocument", fields, "document", path, timeout=60)
             if r.get("ok"):
                 return True
-            print(f"channel sendPhoto not ok: {str(r)[:200]}", flush=True)
+            print(f"channel sendDocument not ok: {str(r)[:200]}", flush=True)
         except Exception as e:
-            print(f"channel sendPhoto try {i + 1}/4 failed: {e}", flush=True)
+            print(f"channel sendDocument try {i + 1}/4 failed: {e}", flush=True)
         time.sleep(3)
     return False
 
